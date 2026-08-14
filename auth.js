@@ -9,8 +9,14 @@ if (!process.env.JWT_SECRET) {
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 
-function signToken(user, workspace) {
-  return jwt.sign({ userId: user.id, email: user.email, workspaceId: workspace.id }, JWT_SECRET, { expiresIn: '30d' });
+// Role hierarchy — higher number = more permissions. 'role' on a signed token is
+// a UI convenience only; every mutating route re-checks the real role from the
+// database, since a token can outlive a role change or a removal from the workspace.
+const ROLES = ['viewer', 'editor', 'power', 'admin'];
+const ROLE_RANK = Object.fromEntries(ROLES.map((r, i) => [r, i]));
+
+function signToken(user, workspace, role) {
+  return jwt.sign({ userId: user.id, email: user.email, workspaceId: workspace.id, role }, JWT_SECRET, { expiresIn: '30d' });
 }
 
 function requireAuth(req, res, next) {
@@ -30,28 +36,33 @@ function randomToken() {
 }
 
 // Sends via Resend (https://resend.com) if RESEND_API_KEY is set. Otherwise, falls
-// back to logging the reset link to the server console — lets the whole flow work
+// back to logging the link to the server console — lets the whole flow work
 // end-to-end locally before you've set up a real email provider.
-async function sendPasswordResetEmail(toEmail, resetLink) {
+async function sendTransactionalEmail(toEmail, subject, html, devLabel) {
   if (!process.env.RESEND_API_KEY) {
-    console.log(`[dev] Password reset requested for ${toEmail} — link: ${resetLink}`);
+    console.log(`[dev] ${devLabel} for ${toEmail} — see link in the HTML below:\n${html}`);
     return;
   }
   try {
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        from: process.env.RESEND_FROM || 'Rosebud <onboarding@resend.dev>',
-        to: toEmail,
-        subject: 'Reset your Rosebud password',
-        html: `<p>Someone requested a password reset for your Rosebud account.</p><p><a href="${resetLink}">Click here to set a new password</a>. This link expires in 1 hour.</p><p>If you didn't request this, you can safely ignore this email.</p>`,
-      }),
+      body: JSON.stringify({ from: process.env.RESEND_FROM || 'Rosebud <onboarding@resend.dev>', to: toEmail, subject, html }),
     });
     if (!res.ok) console.error('Resend email failed:', await res.text());
   } catch (err) {
-    console.error('Failed to send reset email:', err.message);
+    console.error('Failed to send email:', err.message);
   }
 }
 
-module.exports = { bcrypt, JWT_SECRET, FRONTEND_URL, signToken, requireAuth, randomToken, sendPasswordResetEmail };
+async function sendPasswordResetEmail(toEmail, resetLink) {
+  const html = `<p>Someone requested a password reset for your Rosebud account.</p><p><a href="${resetLink}">Click here to set a new password</a>. This link expires in 1 hour.</p><p>If you didn't request this, you can safely ignore this email.</p>`;
+  await sendTransactionalEmail(toEmail, 'Reset your Rosebud password', html, 'Password reset requested');
+}
+
+async function sendInviteEmail(toEmail, inviteLink, workspaceName, role) {
+  const html = `<p>You've been invited to join <b>${workspaceName}</b> on Rosebud as a <b>${role}</b>.</p><p><a href="${inviteLink}">Click here to accept the invite</a>. This link expires in 7 days.</p>`;
+  await sendTransactionalEmail(toEmail, `You're invited to ${workspaceName} on Rosebud`, html, 'Workspace invite sent');
+}
+
+module.exports = { bcrypt, JWT_SECRET, FRONTEND_URL, ROLES, ROLE_RANK, signToken, requireAuth, randomToken, sendPasswordResetEmail, sendInviteEmail };
